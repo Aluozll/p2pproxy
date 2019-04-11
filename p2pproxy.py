@@ -30,6 +30,54 @@ def parse_address(address):
         sys.exit('Expected HOST:PORT: %r' % address)
     return gethostbyname(hostname), port
     
+    
+class P2pSession:
+    def __init__(self, sock):
+        self.sock = sock
+        self.queue = Queue()
+        self.loop = True 
+        
+        if self.sock is None:
+            log('[erro]: P2pSession sock is none')
+            self.loop = False
+            
+    def is_loop(self):
+        return self.loop
+    
+    def break_loop(self):
+        self.loop = False    
+        
+    def read(self, count):
+        return self.sock.recv(count)        
+
+    def write(self, data):
+        self.queue.put(data)
+            
+    def write_loop(self):
+        ret = False
+        
+        try:
+            while True:
+                data = self.queue.get()
+                if not self.is_loop():
+                    break
+                    
+                self.sock.sendall(data)
+                
+            ret = True
+        except:        
+            self.break_loop()
+        
+        return ret
+    
+    def close(self):
+        self.loop = False        
+        if self.sock != None:            
+            self.sock.close()            
+            self.queue.put(1) # break queue.get()
+            
+            self.sock = None
+        
 class P2pClient:
     def __init__(self, src, dst):
         """
@@ -38,18 +86,16 @@ class P2pClient:
         """
         self.src = src
         self.dst = dst
-        self.sock = None  
+        
         self.clients = {}
-        self.queue = None
-        self.loop_run = True
+        self.session = None
         
     def start(self):
-        self.loop_run = True
         gevent.spawn(self.connect)  
     
     def connect(self):
         try:
-            self.sock = create_connection(self.src)
+            sock = create_connection(self.src)
         except IOError as ex:
             log('[erro]: P2pClient failed to connect to %s', self.src)
             return  
@@ -57,40 +103,41 @@ class P2pClient:
         log('[info]: P2pClient connect to server %s', self.src)
         
         self.clients = {}
-        self.queue = Queue()
+        self.session = P2pSession(sock)
+        
         try:
             r = gevent.spawn(self.onread)
             w = gevent.spawn(self.onwrite)
             t = gevent.spawn(self.ontimer)
 
             gevent.joinall([r, w, t])
-
+            
         finally:
-            self.sock = None 
-            self.queue = None
+            self.session = None 
+            
+        log('[info]: P2pClient disconnect to server %s', self.src)
     
     def onread(self):
         try:   
-            self.queue.put(struct.pack('iii', 0, 0, P2P_CMD_CLIENT))
+            self.session.write(struct.pack('iii', 0, 0, P2P_CMD_CLIENT))
             gevent.sleep(1)            
                   
             count = 0
             clientid = 0
             cmd = 0
             
-            while self.loop_run:
+            while self.session.is_loop():
                 if count > 0:
-                    data = self.sock.recv(count)
+                    data = self.session.read(count)
                     if not data:
                         break   
-                    
              
                     count -= len(data)
                     if cmd == P2P_CMD_DATA:                     
-                        self.requestData(clientid, data)
+                        self.request_data(clientid, data)
                 else:       
                     ### parse header
-                    data = self.sock.recv(12)
+                    data = self.session.read(12)
                     if not data:
                         break                        
                   
@@ -102,13 +149,13 @@ class P2pClient:
                             log ("[erro]: P2pClient onread login count[%d] is error", count)
                             break
                             
-                        self.appendClient(clientid)
+                        self.append_client(clientid)
                     elif cmd == P2P_CMD_LOGOUT:
                         if count > 0:
                             log ("[erro]: P2pClient onread logout count[%d] is error", count)
                             break
                             
-                        self.removeClient(clientid)
+                        self.remove_client(clientid)
                     elif cmd == P2P_CMD_TIMER:
                         if count > 0:
                             log ("[erro]: P2pClient onread timer count[%d] is error", count)
@@ -124,186 +171,179 @@ class P2pClient:
         except:
             log ('[erro]: P2pClient onread exception')
         finally:
-            self.loop_run = False
-            
-            if self.sock != None:
-                self.sock.close()
-                self.queue.put('1')    
-
-        log ('[info]: P2pClient onread finished')
+            self.session.close()
     
     def onwrite(self):
+        self.session.write_loop()
+        
+    def ontimer(self):
         try:
-            while self.loop_run:
-                data = self.queue.get()
-                self.sock.sendall(data)
+            start_time = time.time()
+            while self.session.is_loop():                
+                gevent.sleep(1)
+                
+                cur_time = time.time()
+                if cur_time - start_time > 30:
+                    self.session.write(struct.pack('iii', 0, 0, P2P_CMD_TIMER))  
+                    start_time = cur_time
         except:
-            log ('[erro]: P2pClient onwrite error')
-            self.loop_run = False
-
-        log ('[info]: P2pClient write finished')
+            log ('[erro]: P2pClient ontimer error')        
      
-    def responseData(self, clientid, data):
+    def response_data(self, clientid, data):
         if data is None:
             return
             
-        self.queue.put(struct.pack('iii', len(data), clientid, P2P_CMD_DATA)) 
-        self.queue.put(data)
+        self.session.write(struct.pack('iii', len(data), clientid, P2P_CMD_DATA)) 
+        self.session.write(data)
         
-    def requestData(self, clientid, data):
-    
+    def request_data(self, clientid, data):    
         if self.clients.has_key(clientid):
-            self.clients[clientid][1].put(data)
+            self.clients[clientid].write(data)
         else:
-            log ('[warn]: P2pClient requestData client[%d] is missing', clientid)
+            log ('[warn]: P2pClient request_data client[%d] is missing', clientid)
             
-    def appendClient(self, clientid):
+    def append_client(self, clientid):
         log ('[info]: P2pClient client[%d] login', clientid)
         
-        gevent.spawn(self.connectClient, clientid)
+        gevent.spawn(self.connect_client, clientid)
     
-    def removeClient(self, clientid):
+    def remove_client(self, clientid):
         log ('[info]: P2pClient client[%d] logout', clientid)
         
         try:
             if self.clients.has_key(clientid):
-                sock = self.clients[clientid][0]  
-                q = self.clients[clientid][1]  
-                del self.clients[clientid]      
-                sock.close()
-                q.put('1')
+                ss = self.clients[clientid]                
+                del self.clients[clientid]
+                
+                ss.close()
         except:
             log ('[erro]: P2pClient remove client[%d] falied', clientid)
         
-    def connectClient(self, clientid):
+    def connect_client(self, clientid):
         try:
             sock = create_connection(self.dst)
         except IOError as ex:
             log('[erro]: P2pClient failed to connect to %s', self.dst)
             return
         
-        q = Queue()
-        self.clients[clientid] = (sock, q)
+        ss = P2pSession(sock)
+        self.clients[clientid] = ss
         gevent.sleep(1)
         
         try:
-            r = gevent.spawn(self.onclientread, sock, clientid)
-            w = gevent.spawn(self.onclientwrite, sock, q)
+            r = gevent.spawn(self.onclientread, ss, clientid)
+            w = gevent.spawn(self.onclientwrite, ss)
 
             gevent.joinall([r,w])
 
         finally:
-            self.removeClient(clientid)
+            self.remove_client(clientid)
             
-    def onclientread(self, sock, clientid):
+    def onclientread(self, ss, clientid):
         try:
-            while True:
-                data = sock.recv(1024)
+            while ss.is_loop():
+                data = ss.read(4096)
                 if not data:
                     break
                     
-                self.responseData(clientid, data)   
+                self.response_data(clientid, data)   
                 
-            self.queue.put(struct.pack('iii', 0, clientid, P2P_CMD_LOGOUT))   
+            self.session.write(struct.pack('iii', 0, clientid, P2P_CMD_LOGOUT))   
             
         except:
-            log ('[erro]: P2pClient client[%d] read failed', clientid)    
+            ss.break_loop()
+            log ('[erro]: P2pClient client[%d] read failed', clientid)  
     
-    def onclientwrite(self, sock, q):
-        try:
-            while True:
-                data = q.get()
-                sock.sendall(data)
-        except:
-            log ('[erro]: P2pClient onclientwrite failed')      
+    def onclientwrite(self, ss):
+        ss.write_loop()
                         
     def close(self):
         for i in self.clients.keys:
-            self.removeClient(i)
+            self.remove_client(i)
         
-        if self.sock != None:
-            self.sock.close()
-            self.queue.put('1')
-
-    def ontimer(self):
-        try:
-            start_time = time.time()
-            while self.loop_run:                
-                gevent.sleep(1)
-                cur_time = time.time()
-                if cur_time - start_time > 30:
-                    self.queue.put(struct.pack('iii', 0, 0, P2P_CMD_TIMER))  
-                    start_time = cur_time
-        except:
-            log ('[erro]: P2pClient ontimer error')
-            
+        if self.session != None:
+            self.session.close()
+            self.session = None
+         
 class P2pServer(StreamServer):
     def __init__(self, listener, **kwargs):
         StreamServer.__init__(self, listener, **kwargs)
         
         self.netserver = None
         self.client = None
-        self.clientqueue = None
+        
+        self.last_recv_time = 0
 
     def sendcmd(self, clientid, cmd, length = 0):
-        senddata = struct.pack('iii', length, clientid, cmd)
-        self.clientqueue.put(senddata)    
+        if self.client is None:
+            return
+            
+        self.client.write(struct.pack('iii', length, clientid, cmd))    
             
     def senddata(self, clientid, data):
-        self.sendcmd(clientid, 2, len(data))    
-        self.clientqueue.put(data)
+        if self.client is None:
+            return
+            
+        self.sendcmd(clientid, P2P_CMD_DATA, len(data))    
+        self.client.write(data)
 
     def handle(self, source, address): 
         addr = '%s:%d'%(address[0],address[1])
+        
         log("[info]: P2pServer %s connect", addr)
         
         if (self.client != None):
             source.close()
+            log ('[warn]: P2pServer client is not none.')
             return
 
-        self.clientqueue = Queue()
-        self.client = source
+        self.client = P2pSession(source)
+        
+        self.last_recv_time = time.time()
         
         try:
             r = gevent.spawn(self.onread)
             w = gevent.spawn(self.onwrite)
+            t = gevent.spawn(self.ontimer)
 
-            gevent.joinall([r,w])
+            gevent.joinall([r,w,t])
 
         finally:
-            self.clientqueue = None
-            self.client = None        
-            log ('[info]: P2pServer %s disconnect.', addr)
+            self.client = None     
+            
+        log ('[info]: P2pServer %s disconnect.', addr)
 
     def onread(self):
         try:
-            if self.verifyclient():
+            if self.verify_client():
                 count, clientid, cmd = 0, 0, 0
-                while True:
+                while self.client.is_loop():
                     if count > 0:
-                        data = self.client.recv(count)
+                        data = self.client.read(count)
                         if not data:
                             break
-                        
+                            
                         count -= len(data)
                         if cmd == P2P_CMD_DATA:
                             self.netserver.senddata(clientid, data)
                     else:
                         ### parse header
-                        data = self.client.recv(12)
+                        data = self.client.read(12)
                         if not data:
                             break
                             
-                        count, clientid, cmd = struct.unpack('iii', data)                        
+                        count, clientid, cmd = struct.unpack('iii', data)   
+                        self.last_recv_time = time.time()   
+                        
                         if cmd == P2P_CMD_LOGOUT:                            
                             if count > 0:                                   
                                 log("[erro]: P2pServer logout count[%d] is error", count)
                                 break
                                 
-                            self.netserver.shutdownClient(clientid)
+                            self.netserver.shutdown_client(clientid)
                             
-                        elif cmd == P2P_CMD_TIMER:
-                            self.clientqueue.put(struct.pack('iii', 0, 0, P2P_CMD_TIMER))
+                        elif cmd == P2P_CMD_TIMER:                            
+                            self.sendcmd(0, P2P_CMD_TIMER)
                             if count > 0:                                   
                                 log("[erro]: P2pServer timer count[%d] is error", count)
                                 break
@@ -312,19 +352,23 @@ class P2pServer(StreamServer):
             
         finally:
             self.client.close()
-            self.clientqueue.put('1')
 
     def onwrite(self):
+        self.client.write_loop()
+    
+    def ontimer(self):
         try:
-            while True:
-                data = self.clientqueue.get()        
-                self.client.sendall(data)
+            while self.client.is_loop():          
+                gevent.sleep(1)                 
+                if time.time() - self.last_recv_time  > 180:                  
+                    self.client.break_loop()
+                    log ('[warn]: P2pServer client timeout')    
         except:
-            log ("[erro]: P2pServer onwrite sock is disconnected")
+            log ('[erro]: P2pServer ontimer error')           
 
-    def verifyclient(self):
+    def verify_client(self):
         try:
-            data = self.client.recv(12)
+            data = self.client.read(12)
             if data != None:
                 count, clientid, cmd = struct.unpack('iii', data)
                 if count == 0 and cmd == P2P_CMD_CLIENT and clientid == 0:
@@ -333,12 +377,15 @@ class P2pServer(StreamServer):
         except:
             pass
             
-        log("[warn]: P2pServer verifyclient failed")
+        log("[warn]: P2pServer verify_client failed")
         
         return False        
     
             
     def close(self):
+        if self.client != None:
+            self.client.break_loop()
+            
         StreamServer.close(self)            
   
 class NetServer(StreamServer):
@@ -355,30 +402,33 @@ class NetServer(StreamServer):
         if (self.p2pserver.client == None):
             sock.close()
             return
-
-        q = Queue()
+        
+        log ('[info]: StreamServer %s connect.', addr)
+        
+        session = P2pSession(sock)
         
         self.id += 1
         clientid = self.id
-        self.clients[clientid] = (sock, q)
+        self.clients[clientid] = session
         
         try:
-            r = gevent.spawn(self.onread, sock, q, clientid)
-            w = gevent.spawn(self.onwrite, sock, q)
+            r = gevent.spawn(self.onread, session, clientid)
+            w = gevent.spawn(self.onwrite, session)
 
             gevent.joinall([r,w])
 
         finally:
-            del self.clients[clientid]            
-            log ('[info]: %s disconnect.', addr)
+            self.remove_client(clientid)            
+        
+        log ('[info]: StreamServer %s disconnect.', addr)
 
-    def onread(self, sock, queue, clientid):
+    def onread(self, session, clientid):
         try:
             self.p2pserver.sendcmd(clientid, P2P_CMD_LOGIN)   
             gevent.sleep(1)
-            while True:
+            while session.is_loop():
                 try:
-                    data = sock.recv(4096)
+                    data = session.read(4096)
                     if not data:
                         break
                     
@@ -389,29 +439,37 @@ class NetServer(StreamServer):
         except:
             pass 
         finally:
-            sock.close()
-            queue.put('1')        
+            session.close()    
 
-    def onwrite(self, sock, queue):
-        try:
-            while True:
-                data = queue.get()
-                sock.sendall(data)
-        except:      
-            pass
+    def onwrite(self, session):
+        session.write_loop()
         
     def close(self):
+        for i in self.clients.keys:
+            self.clients[clientid].break_loop()     
+            
         StreamServer.close(self)
 
     def senddata(self, clientid, data):
         if self.clients.has_key(clientid):
-            self.clients[clientid][1].put(data)
+            self.clients[clientid].write(data)
     
-    def shutdownClient(self, clientid):
+    def shutdown_client(self, clientid):
         if self.clients.has_key(clientid):
-            self.clients[clientid][0].close()
-
-          
+            self.clients[clientid].close()
+            
+    def remove_client(self, clientid):
+        log ('[info]: NetServer client[%d] logout', clientid)
+        
+        try:
+            if self.clients.has_key(clientid):
+                ss = self.clients[clientid]                
+                del self.clients[clientid]
+                
+                ss.close()
+        except:
+            log ('[erro]: NetServer remove client[%d] exception', clientid)        
+         
 def client_loop(p2phost, serverhost):
 
     p2phost = parse_address(p2phost)
