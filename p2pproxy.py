@@ -52,7 +52,9 @@ class P2pClient:
             self.sock = create_connection(self.src)
         except IOError as ex:
             log('[erro]: P2pClient failed to connect to %s', self.src)
-            return   
+            return  
+        
+        log('[info]: P2pClient connect to server %s', self.src)
         
         self.clients = {}
         self.queue = Queue()
@@ -70,7 +72,7 @@ class P2pClient:
     def onread(self):
         try:   
             self.queue.put(struct.pack('iii', 0, 0, P2P_CMD_CLIENT))
-            gevent.sleep(1)
+            gevent.sleep(1)            
                   
             count = 0
             clientid = 0
@@ -90,8 +92,7 @@ class P2pClient:
                     ### parse header
                     data = self.sock.recv(12)
                     if not data:
-                        break
-                        
+                        break                        
                   
                     count, clientid, cmd = struct.unpack('iii', data)
                     #print 'count[%d], clientid[%d], cmd[%d]' % (count, clientid, cmd)
@@ -226,9 +227,13 @@ class P2pClient:
 
     def ontimer(self):
         try:
-            while self.loop_run:
-                gevent.sleep(30)
-                self.queue.put(struct.pack('iii', 0, 0, P2P_CMD_TIMER))                
+            start_time = time.time()
+            while self.loop_run:                
+                gevent.sleep(1)
+                cur_time = time.time()
+                if cur_time - start_time > 30:
+                    self.queue.put(struct.pack('iii', 0, 0, P2P_CMD_TIMER))  
+                    start_time = cur_time
         except:
             log ('[erro]: P2pClient ontimer error')
             
@@ -415,10 +420,13 @@ def client_loop(p2phost, serverhost):
     while True:
         client = P2pClient(p2phost, serverhost)   
         
+        gevent.signal(signal.SIGTERM, client.close)
+        gevent.signal(signal.SIGINT, client.close)
+        
         client.start()  
         gevent.wait()      
         
-        time.sleep(5)        
+        time.sleep(8)        
         
 def server_loop(p2phost, proxyhost):
 
