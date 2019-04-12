@@ -1,4 +1,4 @@
-#encode=utf-8
+#encoding=utf-8
 #python2
 
 import socket
@@ -11,16 +11,18 @@ import gevent
 from gevent.queue import Queue
 from gevent.server import StreamServer
 from gevent.socket import create_connection, gethostbyname
+import logging
 
+logging.basicConfig(
+    filename='p2pproxy.log',
+    format='%(asctime)s <%(name)s> [%(levelname)s]:%(message)s',
+    level=logging.INFO)
+    
 P2P_CMD_LOGIN = 1
 P2P_CMD_DATA = 2
 P2P_CMD_LOGOUT = 3
 P2P_CMD_CLIENT = 4
 P2P_CMD_TIMER = 5
-
-def log(message, *args):
-    message = message % args
-    sys.stderr.write(message + '\n')
     
 def parse_address(address):
     try:
@@ -36,10 +38,6 @@ class P2pSession:
         self.sock = sock
         self.queue = Queue()
         self.loop = True 
-        
-        if self.sock is None:
-            log('[erro]: P2pSession sock is none')
-            self.loop = False
             
     def is_loop(self):
         return self.loop
@@ -97,10 +95,10 @@ class P2pClient:
         try:
             sock = create_connection(self.src)
         except IOError as ex:
-            log('[erro]: P2pClient failed to connect to %s', self.src)
+            logging.error('P2pClient failed to connect to %s' % str(self.src))
             return  
         
-        log('[info]: P2pClient connect to server %s', self.src)
+        logging.info('P2pClient connect to server %s' % str(self.src))
         
         self.clients = {}
         self.session = P2pSession(sock)
@@ -115,7 +113,7 @@ class P2pClient:
         finally:
             self.session = None 
             
-        log('[info]: P2pClient disconnect to server %s', self.src)
+        logging.info('P2pClient disconnect to server %s' %  str(self.src))
     
     def onread(self):
         try:   
@@ -142,34 +140,34 @@ class P2pClient:
                         break                        
                   
                     count, clientid, cmd = struct.unpack('iii', data)
-                    #print 'count[%d], clientid[%d], cmd[%d]' % (count, clientid, cmd)
+                    logging.debug('count[%d], clientid[%d], cmd[%d]' % (count, clientid, cmd))
                     
                     if cmd == P2P_CMD_LOGIN:                    
                         if count > 0:
-                            log ("[erro]: P2pClient onread login count[%d] is error", count)
+                            logging.error ("P2pClient onread login count[%d] is error" % count)
                             break
                             
                         self.append_client(clientid)
                     elif cmd == P2P_CMD_LOGOUT:
                         if count > 0:
-                            log ("[erro]: P2pClient onread logout count[%d] is error", count)
+                            logging.error ("P2pClient onread logout count[%d] is error" % count)
                             break
                             
                         self.remove_client(clientid)
                     elif cmd == P2P_CMD_TIMER:
                         if count > 0:
-                            log ("[erro]: P2pClient onread timer count[%d] is error", count)
+                            logging.error ("P2pClient onread timer count[%d] is error" % count)
                             break
                     else:
                         if count >= 1024*1024:
-                            log ("[erro]: P2pClient onread count[%d] is too big", count)
+                            logging.error ("P2pClient onread count[%d] is too big" % count)
                             break
                         else:
                             continue
         except IOError as ex:
-            log(str(ex))
+            logging.error('P2pClient onread exception' + str(ex))
         except:
-            log ('[erro]: P2pClient onread exception')
+            logging.error ('P2pClient onread exception')
         finally:
             self.session.close()
     
@@ -187,7 +185,7 @@ class P2pClient:
                     self.session.write(struct.pack('iii', 0, 0, P2P_CMD_TIMER))  
                     start_time = cur_time
         except:
-            log ('[erro]: P2pClient ontimer error')        
+            logging.error ('P2pClient ontimer error')        
      
     def response_data(self, clientid, data):
         if data is None:
@@ -200,15 +198,15 @@ class P2pClient:
         if self.clients.has_key(clientid):
             self.clients[clientid].write(data)
         else:
-            log ('[warn]: P2pClient request_data client[%d] is missing', clientid)
+            logging.warning ('P2pClient request_data client[%d] is missing' % clientid)
             
     def append_client(self, clientid):
-        log ('[info]: P2pClient client[%d] login', clientid)
+        logging.info('P2pClient client[%d] login' % clientid)
         
         gevent.spawn(self.connect_client, clientid)
     
     def remove_client(self, clientid):
-        log ('[info]: P2pClient client[%d] logout', clientid)
+        logging.info ('P2pClient client[%d] logout' % clientid)
         
         try:
             if self.clients.has_key(clientid):
@@ -217,13 +215,13 @@ class P2pClient:
                 
                 ss.close()
         except:
-            log ('[erro]: P2pClient remove client[%d] falied', clientid)
+            logging.error('P2pClient remove client[%d] falied' % clientid)
         
     def connect_client(self, clientid):
         try:
             sock = create_connection(self.dst)
         except IOError as ex:
-            log('[erro]: P2pClient failed to connect to %s', self.dst)
+            logging.error('P2pClient failed to connect to %s' % str(self.dst))
             return
         
         ss = P2pSession(sock)
@@ -252,7 +250,7 @@ class P2pClient:
             
         except:
             ss.break_loop()
-            log ('[erro]: P2pClient client[%d] read failed', clientid)  
+            logging.error ('P2pClient client[%d] read failed' % clientid)  
     
     def onclientwrite(self, ss):
         ss.write_loop()
@@ -287,17 +285,17 @@ class P2pServer(StreamServer):
         self.sendcmd(clientid, P2P_CMD_DATA, len(data))    
         self.client.write(data)
 
-    def handle(self, source, address): 
-        addr = '%s:%d'%(address[0],address[1])
+    def handle(self, sock, address): 
+        addr = '%s:%d' % ( address[0], address[1])
         
-        log("[info]: P2pServer %s connect", addr)
+        logging.info("P2pServer %s connect" % addr)
         
         if (self.client != None):
-            source.close()
-            log ('[warn]: P2pServer client is not none.')
+            sock.close()
+            logging.warning ('P2pServer client is not none.')
             return
 
-        self.client = P2pSession(source)
+        self.client = P2pSession(sock)
         
         self.last_recv_time = time.time()
         
@@ -311,7 +309,7 @@ class P2pServer(StreamServer):
         finally:
             self.client = None     
             
-        log ('[info]: P2pServer %s disconnect.', addr)
+        logging.info ('P2pServer %s disconnect.' % addr)
 
     def onread(self):
         try:
@@ -337,7 +335,7 @@ class P2pServer(StreamServer):
                         
                         if cmd == P2P_CMD_LOGOUT:                            
                             if count > 0:                                   
-                                log("[erro]: P2pServer logout count[%d] is error", count)
+                                logging.error ("P2pServer logout count[%d] is error" % count)
                                 break
                                 
                             self.netserver.shutdown_client(clientid)
@@ -345,10 +343,10 @@ class P2pServer(StreamServer):
                         elif cmd == P2P_CMD_TIMER:                            
                             self.sendcmd(0, P2P_CMD_TIMER)
                             if count > 0:                                   
-                                log("[erro]: P2pServer timer count[%d] is error", count)
+                                logging.error ("P2pServer timer count[%d] is error" % count)
                                 break
         except:
-            log ("[erro]: P2pServer onread sock is disconnected")
+            logging.error ("P2pServer onread sock is exception")
             
         finally:
             self.client.close()
@@ -362,9 +360,9 @@ class P2pServer(StreamServer):
                 gevent.sleep(1)                 
                 if time.time() - self.last_recv_time  > 180:                  
                     self.client.break_loop()
-                    log ('[warn]: P2pServer client timeout')    
+                    logging.warning ('P2pServer client timeout')    
         except:
-            log ('[erro]: P2pServer ontimer error')           
+            logging.error ('P2pServer ontimer exception')           
 
     def verify_client(self):
         try:
@@ -372,12 +370,12 @@ class P2pServer(StreamServer):
             if data != None:
                 count, clientid, cmd = struct.unpack('iii', data)
                 if count == 0 and cmd == P2P_CMD_CLIENT and clientid == 0:
-                    log ('[info]: P2pServer client login')
+                    logging.info ('P2pServer client login')
                     return True
         except:
             pass
             
-        log("[warn]: P2pServer verify_client failed")
+        logging.warning("P2pServer verify_client failed")
         
         return False        
     
@@ -403,7 +401,7 @@ class NetServer(StreamServer):
             sock.close()
             return
         
-        log ('[info]: StreamServer %s connect.', addr)
+        logging.info ('NetServer %s connect.' % addr)
         
         session = P2pSession(sock)
         
@@ -420,7 +418,7 @@ class NetServer(StreamServer):
         finally:
             self.remove_client(clientid)            
         
-        log ('[info]: StreamServer %s disconnect.', addr)
+        logging.info ('NetServer %s disconnect.' % addr)
 
     def onread(self, session, clientid):
         try:
@@ -459,7 +457,7 @@ class NetServer(StreamServer):
             self.clients[clientid].close()
             
     def remove_client(self, clientid):
-        log ('[info]: NetServer client[%d] logout', clientid)
+        logging.info ('NetServer client[%d] logout' % clientid)
         
         try:
             if self.clients.has_key(clientid):
@@ -468,7 +466,7 @@ class NetServer(StreamServer):
                 
                 ss.close()
         except:
-            log ('[erro]: NetServer remove client[%d] exception', clientid)        
+            logging.error ('NetServer remove client[%d] exception' % clientid)        
          
 def client_loop(p2phost, serverhost):
 
