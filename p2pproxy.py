@@ -38,6 +38,10 @@ class P2pSession:
         self.sock = sock
         self.queue = Queue()
         self.loop = True 
+        self.last_read_time = time.time()
+        
+    def is_timeout(self, seconds):
+        return time.time() - self.last_read_time > seconds
             
     def is_loop(self):
         return self.loop
@@ -46,7 +50,14 @@ class P2pSession:
         self.loop = False    
         
     def read(self, count):
-        return self.sock.recv(count)        
+        data = self.sock.recv(count)  
+        if data is None or len(data) == 0:
+            return data
+        
+        self.last_read_time = time.time()
+        
+        return data
+        
 
     def write(self, data):
         self.queue.put(data)
@@ -67,7 +78,7 @@ class P2pSession:
             self.break_loop()
         
         return ret
-    
+        
     def close(self):
         self.loop = False        
         if self.sock != None:            
@@ -175,15 +186,17 @@ class P2pClient:
         self.session.write_loop()
         
     def ontimer(self):
-        try:
-            start_time = time.time()
-            while self.session.is_loop():                
-                gevent.sleep(1)
+        try:  
+            count = 10            
+            while self.session.is_loop(): 
+                gevent.sleep(1)  
                 
-                cur_time = time.time()
-                if cur_time - start_time > 30:
-                    self.session.write(struct.pack('iii', 0, 0, P2P_CMD_TIMER))  
-                    start_time = cur_time
+                if count > 0:
+                    count -= 1
+                    
+                if count == 0 and self.session.is_timeout(30):
+                    self.session.write(struct.pack('iii', 0, 0, P2P_CMD_TIMER))
+                    count = 10                 
         except:
             logging.error ('P2pClient ontimer error')        
      
@@ -269,9 +282,7 @@ class P2pServer(StreamServer):
         
         self.netserver = None
         self.client = None
-        
-        self.last_recv_time = 0
-
+    
     def sendcmd(self, clientid, cmd, length = 0):
         if self.client is None:
             return
@@ -288,36 +299,42 @@ class P2pServer(StreamServer):
     def handle(self, sock, address): 
         addr = '%s:%d' % ( address[0], address[1])
         
-        logging.info("P2pServer %s connect" % addr)
+        logging.info("P2pServer client %s connect" % addr)
         
         if (self.client != None):
             sock.close()
             logging.warning ('P2pServer client is not none.')
             return
 
-        self.client = P2pSession(sock)
-        
-        self.last_recv_time = time.time()
-        
+        session = P2pSession(sock)         
         try:
-            r = gevent.spawn(self.onread)
-            w = gevent.spawn(self.onwrite)
-            t = gevent.spawn(self.ontimer)
+            r = gevent.spawn(self.onread, session)
+            w = gevent.spawn(self.onwrite, session)
+            t = gevent.spawn(self.ontimer, session)
 
             gevent.joinall([r,w,t])
 
         finally:
-            self.client = None     
+            if self.client == session:
+                self.client = None     
             
-        logging.info ('P2pServer %s disconnect.' % addr)
+        logging.info ('P2pServer client %s disconnect.' % addr)
 
-    def onread(self):
+    def onread(self, session):
         try:
-            if self.verify_client():
+            if self.verify_client(session):
+            
+                if self.client != None:
+                    logging.warning ('P2pServer client is not none.')
+                    return
+                    
+                #  verify is ok, set client 
+                self.client = session
+                
                 count, clientid, cmd = 0, 0, 0
-                while self.client.is_loop():
+                while session.is_loop():
                     if count > 0:
-                        data = self.client.read(count)
+                        data = session.read(count)
                         if not data:
                             break
                             
@@ -326,7 +343,7 @@ class P2pServer(StreamServer):
                             self.netserver.senddata(clientid, data)
                     else:
                         ### parse header
-                        data = self.client.read(12)
+                        data = session.read(12)
                         if not data:
                             break
                             
@@ -349,24 +366,30 @@ class P2pServer(StreamServer):
             logging.error ("P2pServer onread sock is exception")
             
         finally:
-            self.client.close()
+            session.close()
 
-    def onwrite(self):
-        self.client.write_loop()
+    def onwrite(self, session):
+        if session is None:
+            return
+
+        session.write_loop()
     
-    def ontimer(self):
+    def ontimer(self, session):
+        if session is None:
+            return
+    
         try:
-            while self.client.is_loop():          
-                gevent.sleep(1)                 
-                if time.time() - self.last_recv_time  > 180:                  
-                    self.client.break_loop()
+            while session.is_loop():          
+                gevent.sleep(1)   
+                if session.is_timeout(120):                  
+                    session.break_loop()
                     logging.warning ('P2pServer client timeout')    
         except:
             logging.error ('P2pServer ontimer exception')           
 
-    def verify_client(self):
+    def verify_client(self, session):
         try:
-            data = self.client.read(12)
+            data = session.read(12)
             if data != None:
                 count, clientid, cmd = struct.unpack('iii', data)
                 if count == 0 and cmd == P2P_CMD_CLIENT and clientid == 0:
