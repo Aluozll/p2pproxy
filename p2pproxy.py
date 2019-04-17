@@ -1,5 +1,4 @@
 #encoding=utf-8
-#python2
 
 import socket
 import sys
@@ -208,7 +207,7 @@ class P2pClient:
         self.session.write(data)
         
     def request_data(self, clientid, data):    
-        if self.clients.has_key(clientid):
+        if clientid in self.clients:
             self.clients[clientid].write(data)
         else:
             logging.warning ('P2pClient request_data client[%d] is missing' % clientid)
@@ -222,7 +221,7 @@ class P2pClient:
         logging.info ('P2pClient client[%d] logout' % clientid)
         
         try:
-            if self.clients.has_key(clientid):
+            if clientid in self.clients:
                 ss = self.clients[clientid]                
                 del self.clients[clientid]
                 
@@ -472,18 +471,18 @@ class NetServer(StreamServer):
         StreamServer.close(self)
 
     def senddata(self, clientid, data):
-        if self.clients.has_key(clientid):
+        if clientid in self.clients:
             self.clients[clientid].write(data)
     
     def shutdown_client(self, clientid):
-        if self.clients.has_key(clientid):
+        if clientid in self.clients:
             self.clients[clientid].close()
             
     def remove_client(self, clientid):
         logging.info ('NetServer client[%d] logout' % clientid)
         
         try:
-            if self.clients.has_key(clientid):
+            if clientid in self.clients:
                 ss = self.clients[clientid]                
                 del self.clients[clientid]
                 
@@ -541,8 +540,7 @@ def main():
     if len(args) < 2:        
         sys.exit(s)
     
-    parms = {}
-    
+    params = {}    
     server_mode = True
     
     for arg in args:
@@ -554,11 +552,11 @@ def main():
                 elif arg[1] == 'S' or arg[1] == 's':
                     server_mode = True
             elif len(arr) == 2:
-                parms[arr[0]] = arr[1]                
+                params[arr[0]] = arr[1]                
 
-    if len(parms) >= 2 and parms.has_key('p2p') and  parms.has_key('server'):
-        p2p = parms['p2p']
-        server = parms['server']
+    if len(params) >= 2 and 'p2p' in params and 'server' in params:
+        p2p = params['p2p']
+        server = params['server']
         
         if server_mode:
             print('start p2p server')
