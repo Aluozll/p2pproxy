@@ -1,6 +1,7 @@
 #encoding=utf-8
 
 import socket
+import errno
 import sys
 import signal
 import time
@@ -37,7 +38,9 @@ class P2pSession:
         self.sock = sock
         self.queue = Queue()
         self.loop = True 
-        self.last_read_time = time.time()
+        self.last_read_time = time.time() 
+        # no block
+        self.sock.setblocking(0)
         
     def is_timeout(self, seconds):
         return time.time() - self.last_read_time > seconds
@@ -49,7 +52,19 @@ class P2pSession:
         self.loop = False    
         
     def read(self, count):
-        data = self.sock.recv(count)  
+        data = None
+        while True:
+            try:
+                data = self.sock.recv(count)
+                break
+            except socket.error, e:
+                if e.args[0] != errno.EAGAIN and e.args[0] != errno.EWOULDBLOCK:
+                    #print(e)
+                    logging.error('sock recv error：%d' % e.args[0])
+                    raise 1
+                else:
+                    gevent.sleep(0.1)        
+        
         if data is None or len(data) == 0:
             return data
         
@@ -70,8 +85,16 @@ class P2pSession:
                 if not self.is_loop():
                     break
                     
-                self.sock.sendall(data)
-                
+                 while True:
+                    try:
+                        self.sock.sendall(data)
+                        break
+                    except socket.error, e:
+                        if e.args[0] != errno.EAGAIN and e.args[0] != errno.EWOULDBLOCK:
+                            #print(e)
+                            logging.error('sock sendall error：%d' % e.args[0])
+                            self.break_loop()
+                            return False                
             ret = True
         except:        
             self.break_loop()
@@ -127,7 +150,9 @@ class P2pClient:
     
     def onread(self):
         try:   
-            self.session.write(struct.pack('iii', 0, 0, P2P_CMD_CLIENT))
+            login_info = 'test_p2p'
+            self.session.write(struct.pack('iii', len(login_info), 0, P2P_CMD_CLIENT))
+            self.session.write(login_info)
             gevent.sleep(1)            
                   
             count = 0
@@ -391,9 +416,11 @@ class P2pServer(StreamServer):
             data = session.read(12)
             if data != None:
                 count, clientid, cmd = struct.unpack('iii', data)
-                if count == 0 and cmd == P2P_CMD_CLIENT and clientid == 0:
-                    logging.info ('P2pServer client login')
-                    return True
+                if count == 8 and cmd == P2P_CMD_CLIENT and clientid == 0:
+                    data = session.read(8)
+                    if data == 'test_p2p':
+                        logging.info ('P2pServer client login')
+                        return True
         except:
             pass
             
