@@ -23,6 +23,8 @@ P2P_CMD_DATA = 2
 P2P_CMD_LOGOUT = 3
 P2P_CMD_CLIENT = 4
 P2P_CMD_TIMER = 5
+
+P2P_BUFFER_MAX = 2048
     
 def parse_address(address):
     try:
@@ -39,6 +41,8 @@ class P2pSession:
         self.queue = Queue()
         self.loop = True 
         self.last_read_time = time.time() 
+        # set timeout
+        # self.sock.settimeout(5)
         # no block
         self.sock.setblocking(0)
         
@@ -49,52 +53,84 @@ class P2pSession:
         return self.loop
     
     def break_loop(self):
-        self.loop = False    
+        self.loop = False  
         
-    def read(self, count):
+    def _read_try(self, count):
         data = None
         while True:
             try:
-                data = self.sock.recv(count)
-                break
+                data = self.sock.recv(count)  
+                break                        
             except socket.error, e:
                 if e.args[0] != errno.EAGAIN and e.args[0] != errno.EWOULDBLOCK:
                     #print(e)
                     logging.error('sock recv error：%d' % e.args[0])
                     raise 1
                 else:
-                    gevent.sleep(0.1)        
-        
+                    gevent.sleep(0.1)
+                    
         if data is None or len(data) == 0:
-            return data
-        
+            return None
+            
         self.last_read_time = time.time()
         
         return data
         
+    def read(self, count):
+        if count < 0:
+            return self._read_try(P2P_BUFFER_MAX)
+        
+        data = []
+        need_read = count
+        while True:
+            chunk = self._read_try(need_read)
+            if chunk is None:
+                return None
+            else:
+                data.append(chunk)
+                need_read = need_read - len(chunk)
+                if need_read == 0:
+                    break
+        
+        return ''.join(data)
+        
 
     def write(self, data):
         self.queue.put(data)
-            
-    def write_loop(self):
-        ret = False
         
+    def _send_all(self, msg):        
+        msglen = len(msg)
+        if msglen == 0:
+            return False
+        
+        totalsent = 0   
+        while totalsent < msglen:
+            try:
+                sent = self.sock.send(msg[totalsent:])
+                if sent == 0:
+                    return False     
+                
+                totalsent = totalsent + sent
+                
+            except socket.error, e:
+                if e.args[0] != errno.EAGAIN and e.args[0] != errno.EWOULDBLOCK:
+                    logging.error('sock sendall error：%d' % e.args[0])
+                    return False    
+                
+        return True
+                
+    def write_loop(self):
+        ret = False        
         try:
             while True:
                 data = self.queue.get()
                 if not self.is_loop():
                     break
                     
-                 while True:
-                    try:
-                        self.sock.sendall(data)
-                        break
-                    except socket.error, e:
-                        if e.args[0] != errno.EAGAIN and e.args[0] != errno.EWOULDBLOCK:
-                            #print(e)
-                            logging.error('sock sendall error：%d' % e.args[0])
-                            self.break_loop()
-                            return False                
+                if not self._send_all(data):
+                    self.break_loop()
+                    break
+                    
             ret = True
         except:        
             self.break_loop()
@@ -277,7 +313,7 @@ class P2pClient:
     def onclientread(self, ss, clientid):
         try:
             while ss.is_loop():
-                data = ss.read(4096)
+                data = ss.read(-1)
                 if not data:
                     break
                     
@@ -475,7 +511,7 @@ class NetServer(StreamServer):
             gevent.sleep(1)
             while session.is_loop():
                 try:
-                    data = session.read(4096)
+                    data = session.read(-1)
                     if not data:
                         break
                     
